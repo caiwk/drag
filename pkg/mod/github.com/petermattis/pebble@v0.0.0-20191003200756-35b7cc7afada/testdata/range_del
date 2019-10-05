@@ -1,0 +1,1358 @@
+# 1 memtable.
+
+define
+mem
+  a.SET.1:b
+  a.SET.3:c
+  a.SET.5:d
+  b.MERGE.1:b
+  b.MERGE.3:c
+  b.MERGE.5:d
+  b.RANGEDEL.6:c
+  b.MERGE.7:e
+  c.SET.1:b
+  c.SET.3:c
+  c.SET.5:d
+----
+mem: 1
+
+get seq=2
+a
+b
+c
+----
+b
+b
+b
+
+get seq=4
+a
+b
+c
+----
+c
+cb
+c
+
+get seq=6
+a
+b
+c
+----
+d
+dcb
+d
+
+get seq=7
+a
+b
+c
+----
+d
+pebble: not found
+d
+
+get seq=8
+a
+b
+c
+----
+d
+e
+d
+
+get seq=6
+a
+b
+c
+----
+d
+dcb
+d
+
+iter seq=6
+first
+next
+next
+next
+seek-ge a
+seek-ge b
+seek-ge c
+seek-ge d
+last
+prev
+prev
+prev
+seek-lt a
+seek-lt b
+seek-lt c
+seek-lt d
+----
+a:d
+b:dcb
+c:d
+.
+a:d
+b:dcb
+c:d
+.
+c:d
+b:dcb
+a:d
+.
+.
+a:d
+b:dcb
+c:d
+
+iter seq=7
+first
+next
+next
+seek-ge a
+seek-ge b
+seek-ge c
+seek-ge d
+last
+prev
+prev
+seek-lt a
+seek-lt b
+seek-lt c
+seek-lt d
+----
+a:d
+c:d
+.
+a:d
+c:d
+c:d
+.
+c:d
+a:d
+.
+.
+a:d
+a:d
+c:d
+
+# Multiple memtables.
+
+define
+mem
+  a.SET.1:b
+  b.MERGE.1:b
+  c.SET.1:b
+mem
+  a.SET.3:c
+  b.MERGE.3:c
+  c.SET.3:c
+mem
+  a.SET.5:d
+  b.MERGE.5:d
+  c.SET.5:d
+mem
+  b.RANGEDEL.6:c
+mem
+  b.MERGE.7:e
+----
+mem: 5
+
+get seq=2
+a
+b
+c
+----
+b
+b
+b
+
+get seq=4
+a
+b
+c
+----
+c
+cb
+c
+
+get seq=6
+a
+b
+c
+----
+d
+dcb
+d
+
+get seq=7
+a
+b
+c
+----
+d
+pebble: not found
+d
+
+get seq=8
+a
+b
+c
+----
+d
+e
+d
+
+get seq=6
+a
+b
+c
+----
+d
+dcb
+d
+
+iter seq=6
+first
+next
+next
+next
+seek-ge a
+seek-ge b
+seek-ge c
+seek-ge d
+last
+prev
+prev
+prev
+seek-lt a
+seek-lt b
+seek-lt c
+seek-lt d
+----
+a:d
+b:dcb
+c:d
+.
+a:d
+b:dcb
+c:d
+.
+c:d
+b:dcb
+a:d
+.
+.
+a:d
+b:dcb
+c:d
+
+iter seq=7
+first
+next
+next
+seek-ge a
+seek-ge b
+seek-ge c
+seek-ge d
+last
+prev
+prev
+seek-lt a
+seek-lt b
+seek-lt c
+seek-lt d
+----
+a:d
+c:d
+.
+a:d
+c:d
+c:d
+.
+c:d
+a:d
+.
+.
+a:d
+a:d
+c:d
+
+# Overlapping range deletions in the same memtable.
+
+define
+mem
+  a.SET.1:1
+  a.SET.3:2
+  a.SET.5:3
+  a.SET.7:4
+  b.SET.1:1
+  b.SET.3:2
+  b.SET.5:3
+  b.SET.7:4
+  c.SET.1:1
+  c.SET.3:2
+  c.SET.5:3
+  c.SET.7:4
+  d.SET.1:1
+  d.SET.3:2
+  d.SET.5:3
+  d.SET.7:4
+  a.RANGEDEL.2:b
+  b.RANGEDEL.4:c
+  b.RANGEDEL.2:c
+  c.RANGEDEL.6:d
+  c.RANGEDEL.4:d
+  c.RANGEDEL.2:d
+----
+mem: 1
+
+get seq=2
+a
+b
+c
+d
+----
+1
+1
+1
+1
+
+get seq=3
+a
+b
+c
+d
+----
+pebble: not found
+pebble: not found
+pebble: not found
+1
+
+get seq=5
+a
+b
+c
+d
+----
+2
+pebble: not found
+pebble: not found
+2
+
+get seq=7
+a
+b
+c
+d
+----
+3
+3
+pebble: not found
+3
+
+get seq=9
+a
+b
+c
+d
+----
+4
+4
+4
+4
+
+iter seq=2
+first
+next
+next
+next
+next
+last
+prev
+prev
+prev
+prev
+----
+a:1
+b:1
+c:1
+d:1
+.
+d:1
+c:1
+b:1
+a:1
+.
+
+iter seq=3
+first
+next
+last
+prev
+----
+d:1
+.
+d:1
+.
+
+iter seq=5
+first
+next
+next
+last
+prev
+prev
+----
+a:2
+d:2
+.
+d:2
+a:2
+.
+
+iter seq=7
+first
+next
+next
+next
+last
+prev
+prev
+prev
+----
+a:3
+b:3
+d:3
+.
+d:3
+b:3
+a:3
+.
+
+iter seq=9
+first
+next
+next
+next
+next
+last
+prev
+prev
+prev
+prev
+----
+a:4
+b:4
+c:4
+d:4
+.
+d:4
+c:4
+b:4
+a:4
+.
+
+# Overlapping range deletions in different memtables. Note that the
+# range tombstones are not fragmented in this case.
+
+define
+mem
+  a.SET.1:1
+  b.SET.1:1
+  c.SET.1:1
+  d.SET.1:1
+mem
+  a.SET.3:2
+  b.SET.3:2
+  c.SET.3:2
+  d.SET.3:2
+  a.RANGEDEL.2:d
+mem
+  a.SET.5:3
+  b.SET.5:3
+  c.SET.5:3
+  d.SET.5:3
+  b.RANGEDEL.4:d
+mem
+  a.SET.7:4
+  b.SET.7:4
+  c.SET.7:4
+  d.SET.7:4
+  c.RANGEDEL.4:d
+----
+mem: 4
+
+get seq=2
+a
+b
+c
+d
+----
+1
+1
+1
+1
+
+get seq=3
+a
+b
+c
+d
+----
+pebble: not found
+pebble: not found
+pebble: not found
+1
+
+get seq=5
+a
+b
+c
+d
+----
+2
+pebble: not found
+pebble: not found
+2
+
+get seq=7
+a
+b
+c
+d
+----
+3
+3
+pebble: not found
+3
+
+get seq=9
+a
+b
+c
+d
+----
+4
+4
+4
+4
+
+iter seq=2
+first
+next
+next
+next
+next
+last
+prev
+prev
+prev
+prev
+----
+a:1
+b:1
+c:1
+d:1
+.
+d:1
+c:1
+b:1
+a:1
+.
+
+iter seq=3
+first
+next
+last
+prev
+----
+d:1
+.
+d:1
+.
+
+iter seq=5
+first
+next
+next
+last
+prev
+prev
+----
+a:2
+d:2
+.
+d:2
+a:2
+.
+
+iter seq=7
+first
+next
+next
+next
+last
+prev
+prev
+prev
+----
+a:3
+b:3
+d:3
+.
+d:3
+b:3
+a:3
+.
+
+iter seq=9
+first
+next
+next
+next
+next
+last
+prev
+prev
+prev
+prev
+----
+a:4
+b:4
+c:4
+d:4
+.
+d:4
+c:4
+b:4
+a:4
+.
+
+# User-key that spans tables in a level.
+
+define
+L1
+  a.SET.3:3
+L1
+  a.SET.2:2
+L1
+  a.SET.1:1
+----
+mem: 1
+1:
+  4:[a-a]
+  5:[a-a]
+  6:[a-a]
+
+get seq=1
+a
+----
+pebble: not found
+
+get seq=2
+a
+----
+1
+
+get seq=3
+a
+----
+2
+
+get seq=4
+a
+----
+3
+
+iter seq=2
+first
+seek-ge a
+seek-ge b
+last
+seek-lt a
+seek-lt b
+----
+a:1
+a:1
+.
+a:1
+.
+a:1
+
+iter seq=3
+first
+seek-ge a
+seek-ge b
+last
+seek-lt a
+seek-lt b
+----
+a:2
+a:2
+.
+a:2
+.
+a:2
+
+iter seq=4
+first
+seek-ge a
+seek-ge b
+last
+seek-lt a
+seek-lt b
+----
+a:3
+a:3
+.
+a:3
+.
+a:3
+
+define
+L1
+  a.MERGE.3:3
+L1
+  a.MERGE.2:2
+L1
+  a.MERGE.1:1
+----
+mem: 1
+1:
+  4:[a-a]
+  5:[a-a]
+  6:[a-a]
+
+get seq=1
+a
+----
+pebble: not found
+
+get seq=2
+a
+----
+1
+
+get seq=3
+a
+----
+21
+
+get seq=4
+a
+----
+321
+
+iter seq=2
+first
+seek-ge a
+seek-ge b
+last
+seek-lt a
+seek-lt b
+----
+a:1
+a:1
+.
+a:1
+.
+a:1
+
+iter seq=3
+first
+seek-ge a
+seek-ge b
+last
+seek-lt a
+seek-lt b
+----
+a:21
+a:21
+.
+a:21
+.
+a:21
+
+iter seq=4
+first
+seek-ge a
+seek-ge b
+last
+seek-lt a
+seek-lt b
+----
+a:321
+a:321
+.
+a:321
+.
+a:321
+
+# User-key spread across multiple levels.
+
+define
+mem
+  a.MERGE.4:4
+L1
+  a.MERGE.3:3
+L2
+  a.MERGE.2:2
+L3
+  a.MERGE.1:1
+----
+mem: 1
+1:
+  4:[a-a]
+2:
+  5:[a-a]
+3:
+  6:[a-a]
+
+get seq=1
+a
+----
+pebble: not found
+
+get seq=2
+a
+----
+1
+
+get seq=3
+a
+----
+21
+
+get seq=4
+a
+----
+321
+
+get seq=5
+a
+----
+4321
+
+iter seq=2
+first
+seek-ge a
+seek-ge b
+last
+seek-lt a
+seek-lt b
+----
+a:1
+a:1
+.
+a:1
+.
+a:1
+
+iter seq=3
+first
+seek-ge a
+seek-ge b
+last
+seek-lt a
+seek-lt b
+----
+a:21
+a:21
+.
+a:21
+.
+a:21
+
+iter seq=4
+first
+seek-ge a
+seek-ge b
+last
+seek-lt a
+seek-lt b
+----
+a:321
+a:321
+.
+a:321
+.
+a:321
+
+iter seq=5
+first
+seek-ge a
+seek-ge b
+last
+seek-lt a
+seek-lt b
+----
+a:4321
+a:4321
+.
+a:4321
+.
+a:4321
+
+# Range deletions on multiple levels.
+define
+L0
+  a.SET.4:4
+  b.SET.4:4
+  d.SET.4:4
+  c.RANGEDEL.4:d
+L1
+  a.SET.3:3
+  d.SET.3:3
+  b.RANGEDEL.3:d
+L2
+  d.SET.2:2
+  a.RANGEDEL.2:d
+L3
+  a.SET.1:1
+  b.SET.1:1
+  c.SET.1:1
+  d.SET.1:1
+----
+mem: 1
+0:
+  4:[a-d]
+1:
+  5:[a-d]
+2:
+  6:[a-d]
+3:
+  7:[a-d]
+
+get seq=2
+a
+b
+c
+d
+----
+1
+1
+1
+1
+
+get seq=3
+a
+b
+c
+d
+----
+pebble: not found
+pebble: not found
+pebble: not found
+2
+
+get seq=4
+a
+b
+c
+d
+----
+3
+pebble: not found
+pebble: not found
+3
+
+get seq=5
+a
+b
+c
+d
+----
+4
+4
+pebble: not found
+4
+
+iter seq=2
+first
+next
+next
+next
+last
+prev
+prev
+prev
+----
+a:1
+b:1
+c:1
+d:1
+d:1
+c:1
+b:1
+a:1
+
+iter seq=3
+first
+last
+----
+d:2
+d:2
+
+iter seq=4
+first
+next
+last
+prev
+----
+a:3
+d:3
+d:3
+a:3
+
+iter seq=5
+first
+next
+next
+last
+prev
+prev
+----
+a:4
+b:4
+d:4
+d:4
+b:4
+a:4
+
+# Range deletions spanning tables within a level.
+
+define
+mem
+  a.SET.3:3
+  b.SET.3:3
+  c.SET.3:3
+  d.SET.3:3
+L1
+  a.RANGEDEL.2:b
+L1
+  b.RANGEDEL.2:c
+L1
+  c.RANGEDEL.2:d
+L2
+  a.SET.1:1
+  b.SET.1:1
+  c.SET.1:1
+  d.SET.1:1
+----
+mem: 1
+1:
+  4:[a-b]
+  5:[b-c]
+  6:[c-d]
+2:
+  7:[a-d]
+
+get seq=2
+a
+b
+c
+d
+----
+1
+1
+1
+1
+
+get seq=3
+a
+b
+c
+d
+----
+pebble: not found
+pebble: not found
+pebble: not found
+1
+
+get seq=4
+a
+b
+c
+d
+----
+3
+3
+3
+3
+
+iter seq=2
+first
+next
+next
+next
+last
+prev
+prev
+prev
+----
+a:1
+b:1
+c:1
+d:1
+d:1
+c:1
+b:1
+a:1
+
+iter seq=3
+first
+last
+----
+d:1
+d:1
+
+iter seq=4
+first
+next
+next
+next
+last
+prev
+prev
+prev
+----
+a:3
+b:3
+c:3
+d:3
+d:3
+c:3
+b:3
+a:3
+
+# Invalid LSM structure (range deletion at newer level covers newer
+# write at an older level). This LSM structure is not generated
+# naturally, but tested here to show the level-by-level nature of Get.
+
+define
+L1
+  a.RANGEDEL.1:b
+L2
+  a.SET.2:2
+----
+mem: 1
+1:
+  4:[a-b]
+2:
+  5:[a-a]
+
+get seq=3
+a
+----
+pebble: not found
+
+# A range tombstone straddles two SSTs. One is compacted to a lower level. Its
+# keys that are newer than the range tombstone should not disappear.
+#
+# Uses a snapshot to prevent range tombstone from being elided when it gets
+# compacted to the bottommost level.
+
+define target-file-sizes=(100, 1) snapshots=(1)
+L0
+  a.RANGEDEL.1:e
+L0
+  a.SET.2:v
+L0
+  c.SET.3:v
+----
+mem: 1
+0:
+  4:[a-e]
+  5:[a-a]
+  6:[c-c]
+
+compact a-e
+----
+1:
+  7:[a-c]
+  8:[c-e]
+
+compact d-e
+----
+1:
+  7:[a-c]
+2:
+  8:[c-e]
+
+iter seq=4
+seek-ge b
+next
+----
+c:v
+.
+
+# Reverse the above test: compact the left file containing the split range
+# tombstone downwards, and iterate from right to left.
+
+define target-file-sizes=(100, 1) snapshots=(1)
+L0
+  a.RANGEDEL.1:e
+L0
+  a.SET.2:v
+L0
+  c.SET.3:v
+----
+mem: 1
+0:
+  4:[a-e]
+  5:[a-a]
+  6:[c-c]
+
+compact a-e
+----
+1:
+  7:[a-c]
+  8:[c-e]
+
+compact a-b
+----
+1:
+  8:[c-e]
+2:
+  7:[a-c]
+
+iter seq=4
+seek-lt d
+prev
+prev
+----
+c:v
+a:v
+.
+
+# A range tombstone straddles two sstables. One is compacted two
+# levels lower. The other is compacted one level lower. The one that
+# is compacted one level lower should not see its boundaries expand
+# causing it to delete more keys. A snapshot is used to prevent range
+# tombstone from being elided when it gets compacted to the bottommost
+# level.
+
+define target-file-sizes=(100, 1) snapshots=(1)
+L0
+  a.RANGEDEL.1:e
+L0
+  a.SET.2:v
+L0
+  c.SET.3:v
+L2
+  d.SET.0:v
+----
+mem: 1
+0:
+  4:[a-e]
+  5:[a-a]
+  6:[c-c]
+2:
+  7:[d-d]
+
+compact a-b
+----
+1:
+  8:[a-c]
+  9:[c-e]
+2:
+  7:[d-d]
+
+compact d-e
+----
+1:
+  8:[a-c]
+3:
+  12:[c-d]
+  13:[d-e]
+
+get seq=4
+c
+----
+v
+
+compact a-b L1
+----
+2:
+  14:[a-c]
+3:
+  12:[c-d]
+  13:[d-e]
+
+get seq=4
+c
+----
+v
+
+# A slight variation on the scenario above where a range tombstone is
+# expanded past the boundaries of its "atomic compaction unit".
+
+define target-file-sizes=(100, 1) snapshots=(1)
+L0
+  a.RANGEDEL.1:e
+L0
+  a.SET.2:v
+L0
+  c.SET.3:v
+L0
+  f.SET.4:v
+L2
+  d.SET.0:v
+----
+mem: 1
+0:
+  4:[a-e]
+  5:[a-a]
+  6:[c-c]
+  7:[f-f]
+2:
+  8:[d-d]
+
+compact a-b
+----
+0:
+  7:[f-f]
+1:
+  9:[a-c]
+  10:[c-e]
+2:
+  8:[d-d]
+
+compact d-e
+----
+0:
+  7:[f-f]
+1:
+  9:[a-c]
+3:
+  13:[c-d]
+  14:[d-e]
+
+get seq=4
+c
+----
+v
+
+compact f-f L0
+----
+1:
+  9:[a-c]
+  7:[f-f]
+3:
+  13:[c-d]
+  14:[d-e]
+
+compact a-f L1
+----
+2:
+  15:[a-c]
+  16:[f-f]
+3:
+  13:[c-d]
+  14:[d-e]
+
+get seq=4
+c
+----
+v

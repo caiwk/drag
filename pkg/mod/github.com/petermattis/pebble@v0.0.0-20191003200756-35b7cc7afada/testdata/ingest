@@ -1,0 +1,372 @@
+ingest
+----
+
+ingest non-existent
+----
+stat non-existent: file does not exist
+
+# Elide ingestion of empty sstables.
+
+build ext0
+----
+
+ingest ext0
+----
+
+lsm
+----
+
+build ext0
+set a 1
+set b 2
+----
+
+ingest ext0
+----
+
+lsm
+----
+6:
+  6:[a-b]
+
+iter
+seek-ge a
+next
+next
+----
+a:1
+b:2
+.
+
+get
+a
+b
+----
+a:1
+b:2
+
+build ext1
+set a 3
+del b
+----
+
+ingest ext1
+----
+
+lsm
+----
+5:
+  7:[a-b]
+6:
+  6:[a-b]
+
+iter
+seek-ge a
+next
+----
+a:3
+.
+
+get
+a
+b
+----
+a:3
+b: pebble: not found
+
+build ext2
+set a 4
+set b 5
+set c 6
+----
+
+ingest ext2
+----
+
+lsm
+----
+4:
+  8:[a-c]
+5:
+  7:[a-b]
+6:
+  6:[a-b]
+
+iter
+seek-ge a
+next
+next
+----
+a:4
+b:5
+c:6
+
+get
+a
+b
+c
+----
+a:4
+b:5
+c:6
+
+build ext3
+merge b 5
+del c
+----
+
+ingest ext3
+----
+
+lsm
+----
+3:
+  9:[b-c]
+4:
+  8:[a-c]
+5:
+  7:[a-b]
+6:
+  6:[a-b]
+
+iter
+seek-ge a
+next
+next
+----
+a:4
+b:55
+.
+
+get
+a
+b
+c
+----
+a:4
+b:55
+c: pebble: not found
+
+build ext4
+set x 7
+set y 8
+----
+
+ingest ext4
+----
+
+lsm
+----
+3:
+  9:[b-c]
+4:
+  8:[a-c]
+5:
+  7:[a-b]
+6:
+  6:[a-b]
+  10:[x-y]
+
+iter
+seek-lt y
+prev
+prev
+----
+x:7
+b:55
+a:4
+
+get
+x
+y
+----
+x:7
+y:8
+
+batch
+set j 9
+set k 10
+----
+
+build ext5
+set k 11
+----
+
+ingest ext5
+----
+
+lsm
+----
+0:
+  13:[j-k]
+  11:[k-k]
+3:
+  9:[b-c]
+4:
+  8:[a-c]
+5:
+  7:[a-b]
+6:
+  6:[a-b]
+  10:[x-y]
+
+iter
+seek-ge j
+next
+----
+j:9
+k:11
+
+get
+j
+k
+----
+j:9
+k:11
+
+batch
+set m 12
+----
+
+build ext6
+set n 13
+----
+
+ingest ext6
+----
+
+lsm
+----
+0:
+  13:[j-k]
+  11:[k-k]
+3:
+  9:[b-c]
+4:
+  8:[a-c]
+5:
+  7:[a-b]
+6:
+  6:[a-b]
+  14:[n-n]
+  10:[x-y]
+
+get
+m
+n
+----
+m:12
+n:13
+
+build ext7
+del-range a c
+del-range x z
+----
+
+ingest ext7
+----
+
+lsm
+----
+0:
+  13:[j-k]
+  11:[k-k]
+  17:[m-m]
+  15:[a-z]
+3:
+  9:[b-c]
+4:
+  8:[a-c]
+5:
+  7:[a-b]
+6:
+  6:[a-b]
+  14:[n-n]
+  10:[x-y]
+
+get
+a
+b
+c
+j
+k
+m
+n
+x
+y
+----
+a: pebble: not found
+b: pebble: not found
+c: pebble: not found
+j:9
+k:11
+m:12
+n:13
+x: pebble: not found
+y: pebble: not found
+
+# A set operation takes precedence over a range deletion at the same
+# sequence number as can occur during ingestion.
+
+build ext8
+set j 20
+del-range j k
+set m 30
+----
+
+ingest ext8
+----
+
+get
+j
+k
+m
+----
+j:20
+k:11
+m:30
+
+build ext9
+del-range a x
+----
+
+build ext10
+set y 40
+----
+
+# Ingesting two files into L0 is allowed.
+
+ingest ext9 ext10
+----
+
+get
+j
+k
+m
+y
+----
+j: pebble: not found
+k: pebble: not found
+m: pebble: not found
+y:40
+
+lsm
+----
+0:
+  13:[j-k]
+  11:[k-k]
+  17:[m-m]
+  15:[a-z]
+  18:[j-m]
+  19:[a-x]
+  20:[y-y]
+3:
+  9:[b-c]
+4:
+  8:[a-c]
+5:
+  7:[a-b]
+6:
+  6:[a-b]
+  14:[n-n]
+  10:[x-y]
