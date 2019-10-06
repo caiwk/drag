@@ -1,6 +1,7 @@
 package rocks
 
 import (
+	log "cfs/cfs/log_manager"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,12 +15,28 @@ type op int
 const (
 	Get op = iota
 	Put
+	Read
+	Write
+	Fdata
+	Kdata
+	GetFileParts
 )
+type Entry struct {
+	Op       op
+	FileName string
+	Off      uint64
+	Size     uint64
+	Data     []byte
+}
+type CEntry struct {
+	Entry     Entry
+	Completed chan bool
+}
 
-
-func DoOp(nh *dragonboat.NodeHost, cluster uint64,op op, kv KVData)  {
+func DoOp(nh *dragonboat.NodeHost, cluster uint64, op op, kv KVData) interface{} {
 	cs := nh.GetNoOPSession(cluster)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 	if op == Put {
 		data, err := json.Marshal(kv)
 		if err != nil {
@@ -29,13 +46,23 @@ func DoOp(nh *dragonboat.NodeHost, cluster uint64,op op, kv KVData)  {
 		if err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "SyncPropose returned error %v\n", err)
 		}
-	} else if op == Get{
-		result, err := nh.SyncRead(ctx, cluster, []byte(kv.Key))
+	} else {
+		search := &DbOp{Key: kv.Key, Op: op}
+		jsonb, err := json.Marshal(search)
 		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "SyncRead returned error %v\n", err)
+			log.Error(err)
+		}
+		log.Info(jsonb,search)
+
+		result, err := nh.SyncRead(ctx, cluster, jsonb)
+		if err != nil {
+			log.Infof("SyncRead returned error %v\n", err)
 		} else {
-			_, _ = fmt.Fprintf(os.Stdout, "query key: %s, result: %s\n", kv.Key, result)
+			log.Infof("query key: %s, result: %s\n", kv.Key, result)
+			return result
 		}
 	}
-	cancel()
+
+	return nil
 }
+

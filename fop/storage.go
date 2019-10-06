@@ -15,133 +15,70 @@
 package fop
 
 import (
+	"cfs/cfs/log_manager"
 	"cfs/cfs/nodehost"
 	"cfs/cfs/rocks"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/lni/dragonboat-example/v3/ondisk/gorocksdb"
 	sm "github.com/lni/dragonboat/v3/statemachine"
 	"io"
-	"log"
+	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
-	"strconv"
-	"sync"
+	"syscall"
 )
 
 const (
 	appliedIndexKey    string = "storage_applied_index"
-	testDBDirName      string = "../storage-data"
+	storageDirName     string = "../storage-data"
 	currentDBFilename  string = "current"
 	updatingDBFilename string = "current.updating"
 )
-
-type KVData struct {
-	Key string
-	Val string
-}
-
-// rocksdb is a wrapper to ensure lookup() and close() can be concurrently
-// invoked. IOnDiskStateMachine.Update() and close() will never be concurrently
-// invoked.
-type rocksdb struct {
-	mu     sync.RWMutex
-	db     *gorocksdb.DB
-	ro     *gorocksdb.ReadOptions
-	wo     *gorocksdb.WriteOptions
-	opts   *gorocksdb.Options
-	closed bool
-}
-
-func (r *rocksdb) lookup(query []byte) ([]byte, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.closed {
-		return nil, errors.New("db already closed")
-	}
-	val, err := r.db.Get(r.ro, query)
-	if err != nil {
-		return nil, err
-	}
-	defer val.Free()
-	data := val.Data()
-	if len(data) == 0 {
-		return []byte(""), nil
-	}
-	v := make([]byte, len(data))
-	copy(v, data)
-	return v, nil
-}
-
-func (r *rocksdb) close() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.closed = true
-	if r.db != nil {
-		r.db.Close()
-	}
-	if r.opts != nil {
-		r.opts.Destroy()
-	}
-	if r.wo != nil {
-		r.wo.Destroy()
-	}
-	if r.ro != nil {
-		r.ro.Destroy()
-	}
-	r.db = nil
-}
-
-// functions below are used to manage the current data directory of RocksDB DB.
-func isNewRun(dir string) bool {
-	fp := filepath.Join(dir, currentDBFilename)
-	if _, err := os.Stat(fp); os.IsNotExist(err) {
-		return true
-	}
-	return false
-}
+const (
+	fileLockedErr string = "resource temporarily unavailable"
+)
 
 // DiskKV is a state machine that implements the IOnDiskStateMachine interface.
 // DiskKV stores key-value pairs in the underlying RocksDB key-value store. As
 // it is used as an example, it is implemented using the most basic features
 // common in most key-value stores. This is NOT a benchmark program.
 type Storage struct {
-	datadir     string
-	clusterID   uint64
-	nodeID      uint64
-	lastApplied uint64
-	aborted     bool
-	closed      bool
-
+	datadir        string
+	clusterID      uint64
+	nodeID         uint64
+	lastApplied    uint64
+	lastAppliedkey string
+	aborted        bool
+	closed         bool
+}
+type PartSnapshot struct {
+	Parent string
+	Size   uint64
+	Path   string
+	Data   []byte
 }
 
 func getNodeDBDirName(clusterID uint64, nodeID uint64) string {
 	part := fmt.Sprintf("%d_%d", clusterID, nodeID)
-	return filepath.Join(testDBDirName, part)
+	return filepath.Join(storageDirName, part)
+}
+func getlastapplykey(clusterID uint64, nodeID uint64) string {
+	part := fmt.Sprintf("%d_%d", clusterID, nodeID)
+	return filepath.Join(appliedIndexKey, part)
 }
 
 // NewDiskKV creates a new disk kv test state machine.
 func NewStorage(clusterID uint64, nodeID uint64) sm.IOnDiskStateMachine {
 	d := &Storage{
-		datadir:   getNodeDBDirName(clusterID, nodeID),
-		clusterID: clusterID,
-		nodeID:    nodeID,
+		datadir:        getNodeDBDirName(clusterID, nodeID),
+		clusterID:      clusterID,
+		nodeID:         nodeID,
+		lastAppliedkey: getlastapplykey(clusterID, nodeID),
 	}
 	return d
-}
-
-func (d *Storage) queryAppliedIndex(db *rocksdb) (uint64, error) {
-	val, err := db.db.Get(db.ro, []byte(appliedIndexKey))
-	if err != nil {
-		return 0, err
-	}
-	defer val.Free()
-	data := val.Data()
-	if len(data) == 0 {
-		return 0, nil
-	}
-	return strconv.ParseUint(string(data), 10, 64)
 }
 func createNodeDataDir(dir string) error {
 	return os.MkdirAll(dir, 0755)
@@ -153,14 +90,14 @@ func (d *Storage) Open(stopc <-chan struct{}) (uint64, error) {
 	if err := createNodeDataDir(d.datadir); err != nil {
 		panic(err)
 	}
-	if lastApplied, err:= rocks.QueryAppliedIndex(rocks.Rocks);err != nil{
-		log.Println(err)
-		d.lastApplied = lastApplied
-	}else {
-		d.lastApplied = 0
+	if index, err := rocks.QueryAppliedIndex(rocks.Rocks, d.lastAppliedkey); err != nil {
+		log.Info(index, err)
+		return 0, nil
+	} else {
+		d.lastApplied = index
 	}
 
-	fmt.Println("open ok ,",d.datadir,d.lastApplied)
+	log.Info("open ok ,", d.datadir, d.lastApplied)
 	return d.lastApplied, nil
 }
 
@@ -175,7 +112,7 @@ func (d *Storage) Lookup(key interface{}) (interface{}, error) {
 	//	return v, err
 	//}
 	//return nil, errors.New("db closed")
-	return nil,nil
+	return nil, nil
 }
 
 // Update updates the state machine. In this example, all updates are put into
@@ -185,28 +122,32 @@ func (d *Storage) Lookup(key interface{}) (interface{}, error) {
 // Sync() method below and choose not to synchronize for every Update(). Sync()
 // will periodically called by Dragonboat to synchronize the state.
 
-func (d *Storage) write(entry *Entry, index uint64) error {
-	if entry.Op != Write {
+func (d *Storage) write(entry *rocks.Entry, index uint64) error {
+	if entry.Op != rocks.Write {
 		return errors.New("not write entry but write")
 	}
-	filename := fmt.Sprintf("%s/%d_%d_%d", d.datadir,d.clusterID, d.nodeID, index)
-	if fd, err := os.Create(filename); err != nil {
-		log.Println(err)
-	} else {
-		if n, err := fd.Write(entry.Data); err != nil {
-			fmt.Println(err)
-		} else {
-			fmt.Printf("write %s succuss ,%d bytse", filename, n)
-		}
+	filename := fmt.Sprintf("%s/%d_%d", d.datadir, d.clusterID, index)
+	fd, err := os.Create(filename)
+	if err != nil {
+		log.Error(err)
 	}
-	key := getPartKey(128,index,"aaa")
-	rocks.DoOp(nodehost.NodeHost,1,rocks.Put,rocks.KVData{Key:key,Val:filename})
+	defer fd.Close()
+	if n, err := fd.Write(entry.Data); err != nil {
+		fmt.Println(err)
+	} else {
+		log.Infof("write %s succuss ,%d bytse", filename, n)
+	}
+
+	key := getPartKey(d.clusterID, index, "aaa", d.nodeID)
+	e := rocks.Entry{Op: entry.Op, Off: entry.Off, Size: entry.Size, FileName: filename}
+	rocks.DoOp(nodehost.NodeHost, 1, rocks.Put, rocks.KVData{Key: key, Val: filename, T: rocks.Fdata, Entry: e})
 	return nil
 }
-func getPartKey(clusterId ,  partId uint64, fileName string) string{
-	return fmt.Sprintf("part_%d_%s_%d",clusterId,fileName,partId)
+func getPartKey(clusterId, partId uint64, fileName string, nodeId uint64) string {
+	return fmt.Sprintf("part_%d_%d_%s_%d", clusterId, nodeId, fileName, partId)
 }
 func (d *Storage) Update(ents []sm.Entry) ([]sm.Entry, error) {
+
 	if d.aborted {
 		panic("update() called after abort set to true")
 	}
@@ -214,7 +155,7 @@ func (d *Storage) Update(ents []sm.Entry) ([]sm.Entry, error) {
 		panic("update called after Close()")
 	}
 	for idx, e := range ents {
-		entry := &Entry{}
+		entry := &rocks.Entry{}
 		if err := json.Unmarshal(e.Cmd, entry); err != nil {
 			panic(err)
 		}
@@ -227,7 +168,9 @@ func (d *Storage) Update(ents []sm.Entry) ([]sm.Entry, error) {
 		panic("lastApplied not moving forward")
 	}
 	d.lastApplied = ents[len(ents)-1].Index
-	rocks.DoOp(nodehost.NodeHost,1,rocks.Put,rocks.KVData{Key: appliedIndexKey, Val: string(d.lastApplied)})
+	val := fmt.Sprintf("%d", d.lastApplied)
+	log.Info("put val ", val)
+	//rocks.DoOp(nodehost.NodeHost, 1, rocks.Put, rocks.KVData{Key: d.lastAppliedkey, Val: val, T: rocks.Kdata})
 	return ents, nil
 }
 
@@ -243,8 +186,13 @@ func (d *Storage) Sync() error {
 // underlying data. In this example, we use RocksDB's snapshot feature to
 // achieve that.
 func (d *Storage) PrepareSnapshot() (interface{}, error) {
-	fmt.Println("try to prepare snap ")
-	return nil, nil
+	log.Info("try to prepare snap ")
+	files, err := ioutil.ReadDir(d.datadir)
+	if err != nil {
+		log.Error(err)
+		return nil, err
+	}
+	return files, nil
 }
 
 // SaveSnapshot saves the state machine state identified by the state
@@ -252,7 +200,64 @@ func (d *Storage) PrepareSnapshot() (interface{}, error) {
 // is not suppose to save the latest state.
 func (d *Storage) SaveSnapshot(ctx interface{},
 	w io.Writer, done <-chan struct{}) error {
-	fmt.Println("try to save snapshot ")
+
+	log.Info("start save snapshot")
+
+	files := ctx.([]os.FileInfo)
+	sz := make([]byte, 8)
+	binary.LittleEndian.PutUint64(sz, uint64(len(files)))
+	if _, err := w.Write(sz); err != nil {
+		log.Error(err)
+		return err
+	}
+	for _, v := range files {
+		log.Info(v.Name())
+		filename := filepath.Join(d.datadir, v.Name())
+		fd, err := os.Open(filename)
+		if err != nil {
+			log.Error(err)
+			panic(err)
+		}
+		//if err = syscall.Flock(int(fd.Fd()), syscall.LOCK_NB|syscall.LOCK_EX); err != nil {
+		//	//todo file need to snapshot is writing
+		//	log.Error(err, fd.Name())
+		//	return err
+		//}
+		log.Info("locked", fd.Name(), fd.Fd())
+
+		file := &PartSnapshot{Path: v.Name(), Size: uint64(v.Size()), Parent: d.datadir}
+		partdata, err := ioutil.ReadAll(fd)
+		if err != nil {
+			log.Error(err, file.Path)
+			panic(err)
+		}
+		file.Data = partdata
+		// todo test the speed of marshal
+		data, err := json.Marshal(file)
+		if err != nil {
+			log.Error(err, file.Path)
+			panic(err)
+		}
+
+		binary.LittleEndian.PutUint64(sz, uint64(len(data)))
+		if _, err := w.Write(sz); err != nil {
+			log.Error(err, file.Path)
+			return err
+		}
+
+		if _, err := w.Write(data); err != nil {
+			log.Error(err, file.Path)
+			return err
+		}
+		if err = syscall.Flock(int(fd.Fd()), syscall.LOCK_NB|syscall.LOCK_UN); err != nil {
+			//todo file need to snapshot is writing
+			log.Error(err, fd.Name())
+			panic(err)
+			return err
+		}
+		fd.Close()
+
+	}
 	return nil
 }
 
@@ -261,7 +266,53 @@ func (d *Storage) SaveSnapshot(ctx interface{},
 // the existing DB to complete the recovery.
 func (d *Storage) RecoverFromSnapshot(r io.Reader,
 	done <-chan struct{}) error {
-		fmt.Println("try to recover form snapshot")
+	log.Info("try to recover form snapshot", d.datadir)
+	sz := make([]byte, 8)
+	if _, err := io.ReadFull(r, sz); err != nil {
+		return err
+	}
+	total := binary.LittleEndian.Uint64(sz)
+	log.Info("start recover form leader,total", total)
+	if err := os.RemoveAll(d.datadir); err != nil {
+		panic(err)
+	}
+
+	if err := os.MkdirAll(d.datadir, 0755); err != nil {
+		panic(err)
+	}
+	for i := uint64(0); i < total; i++ {
+		if _, err := io.ReadFull(r, sz); err != nil {
+			panic(err)
+		}
+		toRead := binary.LittleEndian.Uint64(sz)
+		data := make([]byte, toRead)
+		if _, err := io.ReadFull(r, data); err != nil {
+			panic(err)
+		}
+		snap := &PartSnapshot{}
+		if err := json.Unmarshal(data, snap); err != nil {
+			panic(err)
+		}
+		filePath := path.Join(d.datadir, snap.Path)
+		fd, err := os.Create(filePath)
+		if err != nil {
+			panic(err)
+		}
+		if _, err := fd.Write(snap.Data); err != nil {
+			panic(err)
+		}
+		fd.Close()
+	}
+
+	newLastApplied, err := rocks.QueryAppliedIndex(rocks.Rocks, d.lastAppliedkey)
+	if err != nil {
+		panic(err)
+	}
+	log.Info(newLastApplied, d.lastApplied)
+	if d.lastApplied > newLastApplied {
+		panic("last applied not moving forward")
+	}
+	d.lastApplied = newLastApplied
 
 	return nil
 }

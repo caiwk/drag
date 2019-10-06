@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,11 +45,18 @@ const (
 	currentDBFilename  string = "current"
 	updatingDBFilename string = "current.updating"
 )
-var Rocks  *rocksdb
+
+var Rocks *rocksdb
 
 type KVData struct {
-	Key string
-	Val string
+	Key   string
+	Val   string
+	T     op
+	Entry Entry
+}
+type DbOp struct {
+	Key string `json:"key"`
+	Op  op     `json:"op"`
 }
 
 // rocksdb is a wrapper to ensure lookup() and close() can be concurrently
@@ -62,9 +70,14 @@ type rocksdb struct {
 	opts   *gorocksdb.Options
 	closed bool
 }
-func (r *rocksdb) GetDB() *gorocksdb.DB{
+
+func (r *rocksdb) GetDB() *gorocksdb.DB {
 	return r.db
 }
+
+//func (r *rocksdb) getFileParts(query []byte) ([]byte, error) {
+//
+//}
 func (r *rocksdb) lookup(query []byte) ([]byte, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -75,7 +88,6 @@ func (r *rocksdb) lookup(query []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(val)
 	defer val.Free()
 	data := val.Data()
 	if len(data) == 0 {
@@ -127,7 +139,7 @@ func createDB(dbdir string) (*rocksdb, error) {
 }
 
 // functions below are used to manage the current data directory of RocksDB DB.
-func isNewRun(dir string) bool {
+func isNewRun(dir string) bool	 {
 	fp := filepath.Join(dir, currentDBFilename)
 	if _, err := os.Stat(fp); os.IsNotExist(err) {
 		return true
@@ -267,29 +279,37 @@ func NewDiskKV(clusterID uint64, nodeID uint64) sm.IOnDiskStateMachine {
 	}
 	return d
 }
-func (d *DiskKV)IteratorRead()error{
+func (d *DiskKV) IteratorRead(seek string) (interface{}, error) {
 	rdb := (*rocksdb)(atomic.LoadPointer(&d.db))
 	db := rdb.db
-	readops:= gorocksdb.NewDefaultReadOptions()
-	//readops.SetIterateUpperBound([]byte("f"))
+	readops := gorocksdb.NewDefaultReadOptions()
 	it := db.NewIterator(readops)
 	defer it.Close()
-
-	it.Seek([]byte("a"))
-	for ; it.Valid(); it.Next() {
+	log.Info("start iterator")
+	var res []*KVData
+	for it.Seek([]byte(seek)); it.Valid(); it.Next() {
 		log.Infof("Key: %v Value: %v\n", string(it.Key().Data()), string(it.Value().Data()))
+		if !strings.HasPrefix(string(it.Key().Data()), seek) {
+			log.Info(res)
+			return res, nil
+		}
+		value := &KVData{}
+		if err := json.Unmarshal(it.Value().Data(), value); err != nil {
+			log.Fatal(value, err)
+		}
+		res = append(res, value)
 	}
 
 	if err := it.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return res, nil
 }
-func  QueryAppliedIndex(db *rocksdb) (uint64, error) {
-	if db == nil || db.db == nil{
+func QueryAppliedIndex(db *rocksdb, key string) (uint64, error) {
+	if db == nil || db.db == nil {
 		return 0, nil
 	}
-	val, err := db.db.Get(db.ro, []byte(appliedIndexKey))
+	val, err := db.db.Get(db.ro, []byte(key))
 	if err != nil {
 		return 0, err
 	}
@@ -337,24 +357,38 @@ func (d *DiskKV) Open(stopc <-chan struct{}) (uint64, error) {
 		return 0, err
 	}
 	atomic.SwapPointer(&d.db, unsafe.Pointer(db))
-	appliedIndex, err := QueryAppliedIndex(db)
+	appliedIndex, err := QueryAppliedIndex(db, appliedIndexKey)
 	if err != nil {
 		panic(err)
 	}
 	d.lastApplied = appliedIndex
-	d.IteratorRead()
+	d.IteratorRead("part_128_3_aaa")
 	return appliedIndex, nil
 }
 
 // Lookup queries the state machine.
 func (d *DiskKV) Lookup(key interface{}) (interface{}, error) {
+	search := &DbOp{}
+	if err := json.Unmarshal(key.([]byte), search); err != nil {
+		log.Fatal(err)
+	}
 	db := (*rocksdb)(atomic.LoadPointer(&d.db))
 	if db != nil {
-		v, err := db.lookup(key.([]byte))
-		if err == nil && d.closed {
-			panic("lookup returned valid result when DiskKV is already closed")
+		if search.Op == Get {
+			v, err := db.lookup([]byte(search.Key))
+			if err == nil && d.closed {
+				panic("lookup returned valid result when DiskKV is already closed")
+			}
+			return v, err
+		} else if search.Op == GetFileParts {
+			v, err := d.IteratorRead(search.Key)
+			if err == nil && d.closed {
+				panic("lookup returned valid result when DiskKV is already closed")
+			}
+			log.Info(v)
+			return v, err
 		}
-		return v, err
+
 	}
 	return nil, errors.New("db closed")
 }
@@ -380,7 +414,16 @@ func (d *DiskKV) Update(ents []sm.Entry) ([]sm.Entry, error) {
 		if err := json.Unmarshal(e.Cmd, dataKV); err != nil {
 			panic(err)
 		}
-		wb.Put([]byte(dataKV.Key), []byte(dataKV.Val))
+		if dataKV.T == Kdata {
+			wb.Put([]byte(dataKV.Key), []byte(dataKV.Val))
+		} else if dataKV.T == Fdata {
+			val, err := json.Marshal(dataKV)
+			if err != nil {
+				log.Error(err)
+			}
+			wb.Put([]byte(dataKV.Key), val)
+		}
+
 		ents[idx].Result = sm.Result{Value: uint64(len(ents[idx].Cmd))}
 	}
 	// save the applied index to the DB.
@@ -413,7 +456,7 @@ type diskKVCtx struct {
 // underlying data. In this example, we use RocksDB's snapshot feature to
 // achieve that.
 func (d *DiskKV) PrepareSnapshot() (interface{}, error) {
-	fmt.Println("start prepare save  Snapshot ",d.lastApplied)
+	log.Info("start prepare save db Snapshot ", d.lastApplied)
 	if d.closed {
 		panic("prepare snapshot called after Close()")
 	}
@@ -471,7 +514,7 @@ func (d *DiskKV) saveToWriter(db *rocksdb,
 // is not suppose to save the latest state.
 func (d *DiskKV) SaveSnapshot(ctx interface{},
 	w io.Writer, done <-chan struct{}) error {
-	fmt.Println("start save  Snapshot ",d.lastApplied)
+	log.Info("start save db Snapshot ", d.lastApplied)
 	if d.closed {
 		panic("prepare snapshot called after Close()")
 	}
@@ -491,7 +534,7 @@ func (d *DiskKV) SaveSnapshot(ctx interface{},
 // the existing DB to complete the recovery.
 func (d *DiskKV) RecoverFromSnapshot(r io.Reader,
 	done <-chan struct{}) error {
-		fmt.Println("start recover from Snapshot ",d.lastApplied)
+	log.Info("start recover from db Snapshot ", d.lastApplied)
 	if d.closed {
 		panic("recover from snapshot called after Close()")
 	}
@@ -536,7 +579,7 @@ func (d *DiskKV) RecoverFromSnapshot(r io.Reader,
 	if err := replaceCurrentDBFile(dir); err != nil {
 		return err
 	}
-	newLastApplied, err := QueryAppliedIndex(db)
+	newLastApplied, err := QueryAppliedIndex(db, appliedIndexKey)
 	if err != nil {
 		panic(err)
 	}
