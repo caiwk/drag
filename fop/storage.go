@@ -15,12 +15,15 @@
 package fop
 
 import (
+	"cfs/cfs/nodehost"
+	"cfs/cfs/rocks"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/lni/dragonboat-example/v3/ondisk/gorocksdb"
 	sm "github.com/lni/dragonboat/v3/statemachine"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,8 +31,8 @@ import (
 )
 
 const (
-	appliedIndexKey    string = "disk_kv_applied_index"
-	testDBDirName      string = "storage-data"
+	appliedIndexKey    string = "storage_applied_index"
+	testDBDirName      string = "../storage-data"
 	currentDBFilename  string = "current"
 	updatingDBFilename string = "current.updating"
 )
@@ -110,6 +113,7 @@ type Storage struct {
 	lastApplied uint64
 	aborted     bool
 	closed      bool
+
 }
 
 func getNodeDBDirName(clusterID uint64, nodeID uint64) string {
@@ -149,8 +153,15 @@ func (d *Storage) Open(stopc <-chan struct{}) (uint64, error) {
 	if err := createNodeDataDir(d.datadir); err != nil {
 		panic(err)
 	}
-	fmt.Println("open ok ,",d.datadir)
-	return 0, nil
+	if lastApplied, err:= rocks.QueryAppliedIndex(rocks.Rocks);err != nil{
+		log.Println(err)
+		d.lastApplied = lastApplied
+	}else {
+		d.lastApplied = 0
+	}
+
+	fmt.Println("open ok ,",d.datadir,d.lastApplied)
+	return d.lastApplied, nil
 }
 
 // Lookup queries the state machine.
@@ -180,7 +191,7 @@ func (d *Storage) write(entry *Entry, index uint64) error {
 	}
 	filename := fmt.Sprintf("%s/%d_%d_%d", d.datadir,d.clusterID, d.nodeID, index)
 	if fd, err := os.Create(filename); err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	} else {
 		if n, err := fd.Write(entry.Data); err != nil {
 			fmt.Println(err)
@@ -188,7 +199,12 @@ func (d *Storage) write(entry *Entry, index uint64) error {
 			fmt.Printf("write %s succuss ,%d bytse", filename, n)
 		}
 	}
+	key := getPartKey(128,index,"aaa")
+	rocks.DoOp(nodehost.NodeHost,1,rocks.Put,rocks.KVData{Key:key,Val:filename})
 	return nil
+}
+func getPartKey(clusterId ,  partId uint64, fileName string) string{
+	return fmt.Sprintf("part_%d_%s_%d",clusterId,fileName,partId)
 }
 func (d *Storage) Update(ents []sm.Entry) ([]sm.Entry, error) {
 	if d.aborted {
@@ -211,6 +227,7 @@ func (d *Storage) Update(ents []sm.Entry) ([]sm.Entry, error) {
 		panic("lastApplied not moving forward")
 	}
 	d.lastApplied = ents[len(ents)-1].Index
+	rocks.DoOp(nodehost.NodeHost,1,rocks.Put,rocks.KVData{Key: appliedIndexKey, Val: string(d.lastApplied)})
 	return ents, nil
 }
 

@@ -16,6 +16,7 @@ package rocks
 
 import (
 	"bytes"
+	log "cfs/cfs/log_manager"
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/json"
@@ -39,10 +40,11 @@ import (
 
 const (
 	appliedIndexKey    string = "disk_kv_applied_index"
-	testDBDirName      string = "rocks-data"
+	testDBDirName      string = "../rocks-data"
 	currentDBFilename  string = "current"
 	updatingDBFilename string = "current.updating"
 )
+var Rocks  *rocksdb
 
 type KVData struct {
 	Key string
@@ -60,7 +62,9 @@ type rocksdb struct {
 	opts   *gorocksdb.Options
 	closed bool
 }
-
+func (r *rocksdb) GetDB() *gorocksdb.DB{
+	return r.db
+}
 func (r *rocksdb) lookup(query []byte) ([]byte, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -71,6 +75,7 @@ func (r *rocksdb) lookup(query []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Println(val)
 	defer val.Free()
 	data := val.Data()
 	if len(data) == 0 {
@@ -112,12 +117,13 @@ func createDB(dbdir string) (*rocksdb, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rocksdb{
+	Rocks = &rocksdb{
 		db:   db,
 		ro:   ro,
 		wo:   wo,
 		opts: opts,
-	}, nil
+	}
+	return Rocks, nil
 }
 
 // functions below are used to manage the current data directory of RocksDB DB.
@@ -261,8 +267,28 @@ func NewDiskKV(clusterID uint64, nodeID uint64) sm.IOnDiskStateMachine {
 	}
 	return d
 }
+func (d *DiskKV)IteratorRead()error{
+	rdb := (*rocksdb)(atomic.LoadPointer(&d.db))
+	db := rdb.db
+	readops:= gorocksdb.NewDefaultReadOptions()
+	//readops.SetIterateUpperBound([]byte("f"))
+	it := db.NewIterator(readops)
+	defer it.Close()
 
-func (d *DiskKV) queryAppliedIndex(db *rocksdb) (uint64, error) {
+	it.Seek([]byte("a"))
+	for ; it.Valid(); it.Next() {
+		log.Infof("Key: %v Value: %v\n", string(it.Key().Data()), string(it.Value().Data()))
+	}
+
+	if err := it.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+func  QueryAppliedIndex(db *rocksdb) (uint64, error) {
+	if db == nil || db.db == nil{
+		return 0, nil
+	}
 	val, err := db.db.Get(db.ro, []byte(appliedIndexKey))
 	if err != nil {
 		return 0, err
@@ -311,11 +337,12 @@ func (d *DiskKV) Open(stopc <-chan struct{}) (uint64, error) {
 		return 0, err
 	}
 	atomic.SwapPointer(&d.db, unsafe.Pointer(db))
-	appliedIndex, err := d.queryAppliedIndex(db)
+	appliedIndex, err := QueryAppliedIndex(db)
 	if err != nil {
 		panic(err)
 	}
 	d.lastApplied = appliedIndex
+	d.IteratorRead()
 	return appliedIndex, nil
 }
 
@@ -509,7 +536,7 @@ func (d *DiskKV) RecoverFromSnapshot(r io.Reader,
 	if err := replaceCurrentDBFile(dir); err != nil {
 		return err
 	}
-	newLastApplied, err := d.queryAppliedIndex(db)
+	newLastApplied, err := QueryAppliedIndex(db)
 	if err != nil {
 		panic(err)
 	}

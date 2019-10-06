@@ -19,6 +19,8 @@ package main
 
 import (
 	"bufio"
+	"cfs/cfs/nodehost"
+	"cfs/cfs/rocks"
 	"context"
 	"encoding/json"
 	"flag"
@@ -35,12 +37,14 @@ import (
 	"github.com/lni/goutils/syncutil"
 
 	"cfs/cfs/fop"
+	"cfs/cfs/log_manager"
 )
 
 type RequestType uint64
 
 const (
-	exampleClusterID uint64 = 128
+	storage uint64 = 128
+	rocksdb = 1
 )
 
 const (
@@ -110,6 +114,7 @@ func Read1(chan1 chan fop.CEntry) error {
 	//fmt.Println(string(chunk))
 }
 func main() {
+	log.Info("addfafafafdasfasaf")
 	nodeID := flag.Int("nodeid", 1, "NodeID to use")
 	addr := flag.String("addr", "", "Nodehost address")
 	join := flag.Bool("join", false, "Joining a new node")
@@ -137,7 +142,7 @@ func main() {
 	logger.GetLogger("grpc").SetLevel(logger.WARNING)
 	rc := config.Config{
 		NodeID:             uint64(*nodeID),
-		ClusterID:          exampleClusterID,
+		ClusterID:          storage,
 		ElectionRTT:        10,
 		HeartbeatRTT:       1,
 		CheckQuorum:        true,
@@ -145,7 +150,7 @@ func main() {
 		CompactionOverhead: 5,
 	}
 	datadir := filepath.Join(
-		"storage",
+		"../storage",
 		fmt.Sprintf("node%d", *nodeID))
 	nhc := config.NodeHostConfig{
 		WALDir:         datadir,
@@ -157,11 +162,18 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	nodehost.NodeHost = nh
 	if err := nh.StartOnDiskCluster(peers, *join, fop.NewStorage, rc); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to add cluster, %v\n", err)
 		os.Exit(1)
 	}
-	//raftStopper := syncutil.NewStopper()
+	rc.ClusterID = rocksdb
+	if err := nh.StartOnDiskCluster(peers, *join, rocks.NewDiskKV, rc); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to add cluster, %v\n", err)
+		os.Exit(1)
+	}
+	dbStopper := syncutil.NewStopper()
 	consoleStopper := syncutil.NewStopper()
 	fStoper := syncutil.NewStopper()
 	fch := make(chan fop.CEntry, 1)
@@ -174,7 +186,7 @@ func main() {
 				switch entry.Entry.Op {
 				case fop.Write:
 					fmt.Println("get fop write op")
-					cs := nh.GetNoOPSession(exampleClusterID)
+					cs := nh.GetNoOPSession(storage)
 					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 					defer cancel()
 					data, err := json.Marshal(entry.Entry)
@@ -210,61 +222,66 @@ func main() {
 				nh.Stop()
 				return
 			}
-			if err := Read1(fch); err != nil {
-				panic(err)
+			msg := strings.Replace(s, "\n", "", 1)
+			_, _, _, ok := parseCommand(msg)
+			if ok{
+				ch <- s
+			}else {
+				if err := Read1(fch); err != nil {
+					panic(err)
+				}
 			}
-
-			ch <- s
 		}
 	})
 
-	fStoper.Wait()
-	//printUsage()
-	//raftStopper.RunWorker(func() {
-	//	cs := nh.GetNoOPSession(exampleClusterID)
-	//	for {
-	//		select {
-	//		case v, ok := <-ch:
-	//			if !ok {
-	//				return
-	//			}
-	//			msg := strings.Replace(v, "\n", "", 1)
-	//			// input message must be in the following formats -
-	//			// put key value
-	//			// get key
-	//			rt, key, val, ok := parseCommand(msg)
-	//			if !ok {
-	//				fmt.Fprintf(os.Stderr, "invalid input\n")
-	//				printUsage()
-	//				continue
-	//			}
-	//			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	//			if rt == PUT {
-	//				kv := &rocks.KVData{
-	//					Key: key,
-	//					Val: val,
-	//				}
-	//				data, err := json.Marshal(kv)
-	//				if err != nil {
-	//					panic(err)
-	//				}
-	//				_, err = nh.SyncPropose(ctx, cs, data)
-	//				if err != nil {
-	//					fmt.Fprintf(os.Stderr, "SyncPropose returned error %v\n", err)
-	//				}
-	//			} else {
-	//				result, err := nh.SyncRead(ctx, exampleClusterID, []byte(key))
-	//				if err != nil {
-	//					fmt.Fprintf(os.Stderr, "SyncRead returned error %v\n", err)
-	//				} else {
-	//					fmt.Fprintf(os.Stdout, "query key: %s, result: %s\n", key, result)
-	//				}
-	//			}
-	//			cancel()
-	//		case <-raftStopper.ShouldStop():
-	//			return
-	//		}
-	//	}
-	//})
-	//raftStopper.Wait()
+	//fStoper.Wait()
+	printUsage()
+	dbStopper.RunWorker(func() {
+		cs := nh.GetNoOPSession(rocksdb)
+		for {
+			select {
+			case v, ok := <-ch:
+				if !ok {
+					return
+				}
+				msg := strings.Replace(v, "\n", "", 1)
+				rt, key, val, ok := parseCommand(msg)
+				if !ok {
+					fmt.Fprintf(os.Stderr, "invalid input\n")
+					printUsage()
+					continue
+				}
+				rocks.DoOp(nh,rocksdb,rocks.Put,rocks.KVData{
+					Key: "f",
+					Val: "dfaf",
+				})
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				if rt == PUT {
+					kv := &rocks.KVData{
+						Key: key,
+						Val: val,
+					}
+					data, err := json.Marshal(kv)
+					if err != nil {
+						panic(err)
+					}
+					_, err = nh.SyncPropose(ctx, cs, data)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "SyncPropose returned error %v\n", err)
+					}
+				} else {
+					result, err := nh.SyncRead(ctx, rocksdb, []byte(key))
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "SyncRead returned error %v\n", err)
+					} else {
+						_, _ = fmt.Fprintf(os.Stdout, "query key: %s, result: %s\n", key, result)
+					}
+				}
+				cancel()
+			case <-dbStopper.ShouldStop():
+				return
+			}
+		}
+	})
+	dbStopper.Wait()
 }
