@@ -135,7 +135,7 @@ func Read1(chan1 chan rocks.CEntry) error {
 		fmt.Println("read fail")
 		return err
 	}
-	var size = 1024 * 1024 * 4
+	var size = 1024 * 102
 	defer f.Close()
 	buf := make([]byte, size)
 
@@ -148,20 +148,20 @@ func Read1(chan1 chan rocks.CEntry) error {
 		if n == 0 {
 			break
 		}
-
 		ent := rocks.CEntry{Entry: rocks.Entry{Op: rocks.Write, Data: buf[:n], Size: uint64(n), Off: uint64(i * size)}, Completed: make(chan bool, 1)}
 		chan1 <- ent
 		<-ent.Completed
 		//time.Sleep(time.Second)
 	}
 	return nil
+
 	//fmt.Println(string(chunk))
 }
 func Readtest(chan1 chan rocks.CEntry) error {
-	for i:= 0; i < 1; i ++{
+	for i:= 0; i < 5; i ++{
 		go func() {
 			k:=i
-			for j:=0;j< 500 ;j++  {
+			for j:=0;j< 50 ;j++  {
 				Read1(chan1)
 				log.Infof("thread %d send file ok ",k)
 			}
@@ -174,29 +174,31 @@ func Readtest(chan1 chan rocks.CEntry) error {
 	//fmt.Println(string(chunk))
 }
 func wwork(clusterid uint64,nh dragonboat.NodeHost,entry rocks.CEntry,chann chan bool){
-	fmt.Println("get fop write op")
-	//getParent()
-	cs := nh.GetNoOPSession(clusterid)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	for i:=0;i<10 ;i++  {
+		log.Info("get fop write op",clusterid)
+		//getParent()
+		cs := nh.GetNoOPSession(clusterid)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		data, err := json.Marshal(entry.Entry)
+		if err != nil {
+			panic(err)
+		}
+		_, err = nh.SyncPropose(ctx, cs, data)
 
-	data, err := json.Marshal(entry.Entry)
-	if err != nil {
-		panic(err)
+		if err != nil {
+			log.Errorf("SyncPropose returned error %v\n", err)
+		}
 	}
-	_, err = nh.SyncPropose(ctx, cs, data)
 
-	if err != nil {
-		log.Errorf("SyncPropose returned error %v\n", err)
-	}
-	
+
 	//entry.Completed <-true
 	chann <- true
-	cancel()
 }
 func main() {
 	syscall.Umask(0)
-	for i:=2 ;i< 10000;{
-		i=i+10
+	for i:=2 ;i< 40;{
+		i=i+1
 		Clusters = append(Clusters,uint64(i))
 		log.Info(i)
 	}
@@ -213,6 +215,7 @@ func main() {
 			log.Fatal(err)
 		}
 		err = pprof.WriteHeapProfile(f)
+
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -248,7 +251,7 @@ func main() {
 		CheckQuorum:        true,
 		SnapshotEntries:    100,
 		CompactionOverhead: 5,
-		//MaxInMemLogSize:1024*1024*1024,
+		MaxInMemLogSize:1024*1024*102,
 	}
 	datadir := filepath.Join(
 		"../storage",
@@ -258,6 +261,9 @@ func main() {
 		NodeHostDir:    datadir,
 		RTTMillisecond: 200,
 		RaftAddress:    nodeAddr,
+		MaxReceiveQueueSize:1024*1024*102,
+		MaxSendQueueSize:1024*1024*102,
+
 	}
 	nh, err := dragonboat.NewNodeHost(nhc)
 	if err != nil {
@@ -297,7 +303,7 @@ func main() {
 						go wwork(Clusters[i],*nh,entry,chann)
 					}
 					go func() {
-						for i:=0; i< len(Clusters)/2 ;i++  {
+						for i:=0; i< len(Clusters) ;i++  {
 							<-chann
 						}
 						entry.Completed <-true

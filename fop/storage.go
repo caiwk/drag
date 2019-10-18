@@ -16,7 +16,7 @@ package fop
 
 import (
 	"cfs/cfs/log_manager"
-	"cfs/cfs/nodehost"
+	//"cfs/cfs/nodehost"
 	"cfs/cfs/rocks"
 	"encoding/binary"
 	"encoding/json"
@@ -138,9 +138,9 @@ func (d *Storage) write(entry *rocks.Entry, index uint64) error {
 		log.Infof("write %s succuss ,%d bytse", filename, n)
 	}
 
-	key := getPartKey(d.clusterID, index, "aaa", d.nodeID)
-	e := rocks.Entry{Op: entry.Op, Off: entry.Off, Size: entry.Size, FileName: filename}
-	rocks.DoOp(nodehost.NodeHost, 1, rocks.Put, rocks.KVData{Key: key, Val: filename, T: rocks.Fdata, Entry: e})
+	//key := getPartKey(d.clusterID, index, "aaa", d.nodeID)
+	//e := rocks.Entry{Op: entry.Op, Off: entry.Off, Size: entry.Size, FileName: filename}
+	//rocks.DoOp(nodehost.NodeHost, 1, rocks.Put, rocks.KVData{Key: key, Val: filename, T: rocks.Fdata, Entry: e})
 	return nil
 }
 func getPartKey(clusterId, partId uint64, fileName string, nodeId uint64) string {
