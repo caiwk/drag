@@ -16,6 +16,8 @@ package fop
 
 import (
 	"cfs/cfs/log_manager"
+	"cfs/cfs/nodehost"
+
 	//"cfs/cfs/nodehost"
 	"cfs/cfs/rocks"
 	"encoding/binary"
@@ -170,7 +172,7 @@ func (d *Storage) Update(ents []sm.Entry) ([]sm.Entry, error) {
 	d.lastApplied = ents[len(ents)-1].Index
 	val := fmt.Sprintf("%d", d.lastApplied)
 	log.Info("put val ", val)
-	//rocks.DoOp(nodehost.NodeHost, 1, rocks.Put, rocks.KVData{Key: d.lastAppliedkey, Val: val, T: rocks.Kdata})
+	rocks.DoOp(nodehost.NodeHost, 1, rocks.Put, rocks.KVData{Key: d.lastAppliedkey, Val: val, T: rocks.Kdata})
 	return ents, nil
 }
 

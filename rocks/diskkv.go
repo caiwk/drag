@@ -362,7 +362,7 @@ func (d *DiskKV) Open(stopc <-chan struct{}) (uint64, error) {
 		panic(err)
 	}
 	d.lastApplied = appliedIndex
-	d.IteratorRead("part_128_3_aaa")
+	//d.IteratorRead("part_128_3_aaa")
 	return appliedIndex, nil
 }
 

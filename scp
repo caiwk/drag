@@ -1,0 +1,5 @@
+go build
+scp cfs root@host71:/var/cold-storage/drag/work
+
+scp cfs  root@host72:/var/cold-storage/drag/work
+scp cfs root@host73:/var/cold-storage/drag/work
