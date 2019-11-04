@@ -28,7 +28,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,12 +50,12 @@ var Rocks *rocksdb
 type KVData struct {
 	Key   string
 	Val   string
-	T     op
+	T     Op
 	Entry Entry
 }
 type DbOp struct {
 	Key string `json:"key"`
-	Op  op     `json:"op"`
+	Op  Op     `json:"op"`
 }
 
 // rocksdb is a wrapper to ensure lookup() and close() can be concurrently
@@ -74,6 +73,39 @@ type rocksdb struct {
 func (r *rocksdb) GetDB() *gorocksdb.DB {
 	return r.db
 }
+// Lookup queries the state machine.
+func (d *DiskKV) Lookup(key interface{}) (interface{}, error) {
+	search := &DbOp{}
+	if err := json.Unmarshal(key.([]byte), search); err != nil {
+		log.Fatal(err)
+	}
+	db := (*rocksdb)(atomic.LoadPointer(&d.db))
+	if db != nil {
+		if search.Op == Get {
+			v, err := db.lookup([]byte(search.Key))
+			if err == nil && d.closed {
+				panic("lookup returned valid result when DiskKV is already closed")
+			}
+			return v, err
+		} else if search.Op == GetFileParts {
+			v, err := d.IteratorRead(search.Key)
+			if err == nil && d.closed {
+				panic("lookup returned valid result when DiskKV is already closed")
+			}
+			log.Info(v)
+			return v, err
+		}
+
+	}
+	return nil, errors.New("db closed")
+}
+// Update updates the state machine. In this example, all updates are put into
+// a RocksDB write batch and then atomically written to the DB together with
+// the index of the last Raft Log entry. For simplicity, we always Sync the
+// writes (db.wo.Sync=True). To get higher throughput, you can implement the
+// Sync() method below and choose not to synchronize for every Update(). Sync()
+// will periodically called by Dragonboat to synchronize the state.
+
 
 //func (r *rocksdb) getFileParts(query []byte) ([]byte, error) {
 //
@@ -120,6 +152,7 @@ func (r *rocksdb) close() {
 // createDB creates a RocksDB DB at the specified directory.
 func createDB(dbdir string) (*rocksdb, error) {
 	opts := gorocksdb.NewDefaultOptions()
+	opts.SetPrefixExtractor(gorocksdb.NewFixedPrefixTransform(1))
 	opts.SetCreateIfMissing(true)
 	opts.SetUseFsync(true)
 	wo := gorocksdb.NewDefaultWriteOptions()
@@ -139,7 +172,7 @@ func createDB(dbdir string) (*rocksdb, error) {
 }
 
 // functions below are used to manage the current data directory of RocksDB DB.
-func isNewRun(dir string) bool	 {
+func isNewRun(dir string) bool {
 	fp := filepath.Join(dir, currentDBFilename)
 	if _, err := os.Stat(fp); os.IsNotExist(err) {
 		return true
@@ -279,32 +312,7 @@ func NewDiskKV(clusterID uint64, nodeID uint64) sm.IOnDiskStateMachine {
 	}
 	return d
 }
-func (d *DiskKV) IteratorRead(seek string) (interface{}, error) {
-	rdb := (*rocksdb)(atomic.LoadPointer(&d.db))
-	db := rdb.db
-	readops := gorocksdb.NewDefaultReadOptions()
-	it := db.NewIterator(readops)
-	defer it.Close()
-	log.Info("start iterator")
-	var res []*KVData
-	for it.Seek([]byte(seek)); it.Valid(); it.Next() {
-		log.Infof("Key: %v Value: %v\n", string(it.Key().Data()), string(it.Value().Data()))
-		if !strings.HasPrefix(string(it.Key().Data()), seek) {
-			log.Info(res)
-			return res, nil
-		}
-		value := &KVData{}
-		if err := json.Unmarshal(it.Value().Data(), value); err != nil {
-			log.Fatal(value, err)
-		}
-		res = append(res, value)
-	}
 
-	if err := it.Err(); err != nil {
-		return nil, err
-	}
-	return res, nil
-}
 func QueryAppliedIndex(db *rocksdb, key string) (uint64, error) {
 	if db == nil || db.db == nil {
 		return 0, nil
@@ -362,82 +370,11 @@ func (d *DiskKV) Open(stopc <-chan struct{}) (uint64, error) {
 		panic(err)
 	}
 	d.lastApplied = appliedIndex
-	//d.IteratorRead("part_128_3_aaa")
+	d.IteratorRead("disk")
 	return appliedIndex, nil
 }
 
-// Lookup queries the state machine.
-func (d *DiskKV) Lookup(key interface{}) (interface{}, error) {
-	search := &DbOp{}
-	if err := json.Unmarshal(key.([]byte), search); err != nil {
-		log.Fatal(err)
-	}
-	db := (*rocksdb)(atomic.LoadPointer(&d.db))
-	if db != nil {
-		if search.Op == Get {
-			v, err := db.lookup([]byte(search.Key))
-			if err == nil && d.closed {
-				panic("lookup returned valid result when DiskKV is already closed")
-			}
-			return v, err
-		} else if search.Op == GetFileParts {
-			v, err := d.IteratorRead(search.Key)
-			if err == nil && d.closed {
-				panic("lookup returned valid result when DiskKV is already closed")
-			}
-			log.Info(v)
-			return v, err
-		}
 
-	}
-	return nil, errors.New("db closed")
-}
-
-// Update updates the state machine. In this example, all updates are put into
-// a RocksDB write batch and then atomically written to the DB together with
-// the index of the last Raft Log entry. For simplicity, we always Sync the
-// writes (db.wo.Sync=True). To get higher throughput, you can implement the
-// Sync() method below and choose not to synchronize for every Update(). Sync()
-// will periodically called by Dragonboat to synchronize the state.
-func (d *DiskKV) Update(ents []sm.Entry) ([]sm.Entry, error) {
-	if d.aborted {
-		panic("update() called after abort set to true")
-	}
-	if d.closed {
-		panic("update called after Close()")
-	}
-	wb := gorocksdb.NewWriteBatch()
-	defer wb.Destroy()
-	db := (*rocksdb)(atomic.LoadPointer(&d.db))
-	for idx, e := range ents {
-		dataKV := &KVData{}
-		if err := json.Unmarshal(e.Cmd, dataKV); err != nil {
-			panic(err)
-		}
-		if dataKV.T == Kdata {
-			wb.Put([]byte(dataKV.Key), []byte(dataKV.Val))
-		} else if dataKV.T == Fdata {
-			val, err := json.Marshal(dataKV)
-			if err != nil {
-				log.Error(err)
-			}
-			wb.Put([]byte(dataKV.Key), val)
-		}
-
-		ents[idx].Result = sm.Result{Value: uint64(len(ents[idx].Cmd))}
-	}
-	// save the applied index to the DB.
-	idx := fmt.Sprintf("%d", ents[len(ents)-1].Index)
-	wb.Put([]byte(appliedIndexKey), []byte(idx))
-	if err := db.db.Write(db.wo, wb); err != nil {
-		return nil, err
-	}
-	if d.lastApplied >= ents[len(ents)-1].Index {
-		panic("lastApplied not moving forward")
-	}
-	d.lastApplied = ents[len(ents)-1].Index
-	return ents, nil
-}
 
 // Sync synchronizes all in-core state of the state machine. Since the Update
 // method in this example already does that every time when it is invoked, the

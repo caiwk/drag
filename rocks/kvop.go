@@ -6,23 +6,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/lni/dragonboat/v3"
+	"github.com/lni/dragonboat/v3/client"
 	"os"
 	"time"
 )
 
-type op int
+type Op int
+var NH *dragonboat.NodeHost
 
 const (
-	Get op = iota
+	Get Op = iota
 	Put
 	Read
 	Write
 	Fdata
 	Kdata
 	GetFileParts
+	AddDisk
+	AddPartition
+
 )
+
 type Entry struct {
-	Op       op
+	Op       Op
 	FileName string
 	Off      uint64
 	Size     uint64
@@ -32,8 +38,37 @@ type CEntry struct {
 	Entry     Entry
 	Completed chan bool
 }
+type DBop struct {
+	Op  Op
+	Key []byte
+	Val []byte
+}
 
-func DoOp(nh *dragonboat.NodeHost, cluster uint64, op op, kv KVData) interface{} {
+func NewDBop(op Op, k []byte, v []byte) *DBop {
+	return &DBop{Op: op, Key: k, Val: v}
+}
+
+func ProposeOp(op *DBop)  error{
+	cs := getNoOPSession()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	data, err := json.Marshal(op)
+	if err != nil {
+		log.Error(err)
+		return err
+	}
+	_, err = NH.SyncPropose(ctx, cs, data)
+	if err != nil {
+		log.Errorf("SyncPropose returned error %v\n", err)
+		return err
+	}
+	return nil
+}
+func getNoOPSession() *client.Session{
+	return NH.GetNoOPSession(1)
+}
+
+func DoOp(nh *dragonboat.NodeHost, cluster uint64, op Op, kv KVData) interface{} {
 	cs := nh.GetNoOPSession(cluster)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -52,7 +87,7 @@ func DoOp(nh *dragonboat.NodeHost, cluster uint64, op op, kv KVData) interface{}
 		if err != nil {
 			log.Error(err)
 		}
-		log.Info(jsonb,search)
+		log.Info(jsonb, search)
 
 		result, err := nh.SyncRead(ctx, cluster, jsonb)
 		if err != nil {
@@ -65,4 +100,3 @@ func DoOp(nh *dragonboat.NodeHost, cluster uint64, op op, kv KVData) interface{}
 
 	return nil
 }
-

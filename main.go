@@ -19,6 +19,7 @@ package main
 
 import (
 	"bufio"
+	"cfs/cfs/diskpartition"
 	"cfs/cfs/nodehost"
 	"cfs/cfs/rocks"
 	"context"
@@ -197,13 +198,15 @@ func wwork(clusterid uint64,nh dragonboat.NodeHost,entry rocks.CEntry,chann chan
 }
 func main() {
 	syscall.Umask(0)
-	for i:=2 ;i< 40;{
+
+	for i:=2 ;i< 10;{
 		i=i+1
 		Clusters = append(Clusters,uint64(i))
 		log.Info(i)
 	}
 
 	nodeID := flag.Int("nodeid", 1, "NodeID to use")
+
 	addr := flag.String("addr", "", "Nodehost address")
 	join := flag.Bool("join", false, "Joining a new node")
 	flag.Parse()
@@ -270,7 +273,7 @@ func main() {
 		panic(err)
 	}
 
-	nodehost.NodeHost = nh
+	rocks.NH = nh
 
 
 	for _,v:= range Clusters{
@@ -286,6 +289,7 @@ func main() {
 		log.Error(os.Stderr, "failed to add cluster, %v\n", err)
 		os.Exit(1)
 	}
+	diskpartition.InitDir(*nodeID)
 	dbStopper := syncutil.NewStopper()
 	consoleStopper := syncutil.NewStopper()
 	fStoper := syncutil.NewStopper()
@@ -337,9 +341,10 @@ func main() {
 			if ok {
 				ch <- s
 			} else {
-				if err := Readtest(fch); err != nil {
-					panic(err)
-				}
+				//if err := Readtest(fch); err != nil {
+				//	panic(err)
+				//}
+				diskpartition.InitDir(*nodeID)
 			}
 		}
 	})
